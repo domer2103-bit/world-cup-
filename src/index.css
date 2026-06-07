@@ -1,0 +1,65 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Montserrat:wght@400;500;600;700;800;900&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Montserrat", "Inter", sans-serif;
+  
+  --color-background-app: #101415;
+  --color-surface-app: #101415;
+  --color-surface-dim: #101415;
+  --color-surface-bright: #363a3b;
+  --color-surface-lowest: #0b0f10;
+  --color-surface-low: #191c1e;
+  --color-surface-base: #1d2022;
+  --color-surface-high: #272a2c;
+  --color-surface-highest: #323537;
+  
+  --color-on-surface: #e0e3e5;
+  --color-on-surface-variant: #c6c6cd;
+  --color-outline-variant: #45464d;
+  
+  --color-primary-accent: #bec6e0;
+  --color-primary-container-app: #0f172a;
+  --color-on-primary-container-app: #798098;
+  
+  --color-brand-secondary: #4ae176;
+  --color-brand-secondary-container: #00b954;
+  --color-brand-on-secondary-container: #004119;
+  --color-brand-on-secondary: #003915;
+  
+  --color-brand-tertiary: #ffb95f;
+  --color-brand-tertiary-container: #251400;
+  --color-brand-on-tertiary-container: #b47300;
+  
+  --animate-pulse-green: pulse-green 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+@keyframes pulse-green {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.5;
+    transform: scale(1.05);
+  }
+}
+
+/* Custom Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+::-webkit-scrollbar-thumb {
+  background: #3f465c;
+  border-radius: 10px;
+}
+
+body {
+  background-color: #101415;
+  color: #e0e3e5;
+}
