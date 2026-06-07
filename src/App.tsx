@@ -11,13 +11,7 @@ import {
   Trophy, 
   Sparkles, 
   X,
-  Info,
-  Calendar,
-  Sliders,
-  Award,
-  TrendingUp,
-  History,
-  LayoutDashboard
+  UserPlus
 } from 'lucide-react';
 import { Sidebar } from './components/Sidebar';
 import { DashboardView } from './components/DashboardView';
@@ -26,10 +20,27 @@ import { BonusView } from './components/BonusView';
 import { LeaderboardView } from './components/LeaderboardView';
 import { ActiveTab, Match, Competitor } from './types';
 import { INITIAL_MATCHES, GLOBAL_LEADERBOARD, FRIENDS_LEADERBOARD } from './data';
+import { 
+  createLeague, 
+  joinLeague, 
+  getMyLeagues, 
+  subscribeLeagueMembers, 
+  syncMyScoreInLeagues, 
+  getOrGenerateMemberId,
+  LeagueInfo,
+  LeagueMember 
+} from './lib/leagueService';
 
 export default function App() {
   // Navigation
   const [activeTab, setActiveTab] = useState<ActiveTab>('dashboard');
+
+  // Custom User details
+  const [username, setUsername] = useState<string>(() => {
+    return localStorage.getItem('goalmaster_username') || 'Tournament Pro';
+  });
+
+  const userMemberId = getOrGenerateMemberId();
 
   // Core interactive statistics backed by localStorage persistence
   const [userPoints, setUserPoints] = useState<number>(() => {
@@ -55,9 +66,19 @@ export default function App() {
     return localStorage.getItem('goalmaster_bonus_boot') || 'Kylian Mbappé (France)';
   });
 
+  // Custom leagues state
+  const [myLeagues, setMyLeagues] = useState<{ id: string; name: string }[]>(() => getMyLeagues());
+  const [currentLeagueId, setCurrentLeagueId] = useState<string | null>(null);
+  const [currentLeague, setCurrentLeague] = useState<LeagueInfo | null>(null);
+  const [currentLeagueMembers, setCurrentLeagueMembers] = useState<LeagueMember[]>([]);
+
+  // Invite modal logic states
+  const [joinInviteLeague, setJoinInviteLeague] = useState<LeagueInfo | null>(null);
+  const [inviteModalOpen, setInviteModalOpen] = useState(false);
+
   // Computed deadlines
   const isSecondRoundStarted = matches.some(m => 
-    (m.id === 'm15' || m.id === 'm16' || m.stage !== 'group') && 
+    (m.matchNumber >= 5 || m.stage !== 'group') && 
     (m.status === 'live' || m.status === 'finished')
   );
 
@@ -85,7 +106,36 @@ export default function App() {
     }, 4000);
   };
 
-  // Sync to local storage
+  // On Mount: Detect if there is a leagueId parameter in query-string
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const urlLeagueId = params.get('leagueId');
+    if (urlLeagueId) {
+      import('./lib/firebase').then(({ db }) => {
+        import('firebase/firestore').then(({ doc, getDoc }) => {
+          getDoc(doc(db, 'leagues', urlLeagueId)).then((snap) => {
+            if (snap.exists()) {
+              const data = snap.data();
+              setJoinInviteLeague({
+                id: urlLeagueId,
+                name: data.name,
+                creatorName: data.creatorName
+              });
+              setInviteModalOpen(true);
+            } else {
+              showToast("The invite link expired or is invalid.", "info");
+              // Clear invalid query params
+              window.history.replaceState({}, document.title, window.location.pathname);
+            }
+          }).catch((err) => {
+            console.error('Error fetching league details of invite link:', err);
+          });
+        });
+      });
+    }
+  }, []);
+
+  // Sync general selections to local storage
   useEffect(() => {
     localStorage.setItem('goalmaster_user_points', userPoints.toString());
     localStorage.setItem('goalmaster_user_rank', userRank.toString());
@@ -96,16 +146,14 @@ export default function App() {
 
   // Sync leaderboards depending on user score!
   useEffect(() => {
-    // Update current user positions inside global and friends boards
     setFriendsStandings((prev) => {
       const updated = prev.map((competitor) => {
         if (competitor.isUser || competitor.name.includes('(You)')) {
-          return { ...competitor, points: userPoints };
+          return { ...competitor, name: `${username} (You)`, points: userPoints };
         }
         return competitor;
       }).sort((a, b) => b.points - a.points);
 
-      // Compute user rank dynamically based on sorting
       const userIndex = updated.findIndex(c => c.isUser || c.name.includes('(You)'));
       if (userIndex !== -1) {
         setUserRank(userIndex + 1);
@@ -113,14 +161,94 @@ export default function App() {
 
       return updated;
     });
-  }, [userPoints]);
+  }, [userPoints, username]);
+
+  // Handle live score syncing of ourselves to all joined private leagues
+  useEffect(() => {
+    const exactScores = matches.filter(m => m.status === 'finished' && m.exactScoreWon).length;
+    const correctOutcomes = matches.filter(m => m.status === 'finished' && m.outcomeOnlyWon).length;
+    
+    const preds: Record<string, { home: number; away: number }> = {};
+    matches.forEach((m) => {
+      if (m.predHome !== undefined && m.predAway !== undefined) {
+        preds[m.id] = { home: m.predHome, away: m.predAway };
+      }
+    });
+
+    syncMyScoreInLeagues(username, userPoints, exactScores, correctOutcomes, preds);
+  }, [userPoints, matches, username]);
+
+  // Subscribe to real-time custom league scoreboard changes
+  useEffect(() => {
+    if (!currentLeagueId) {
+      setCurrentLeague(null);
+      setCurrentLeagueMembers([]);
+      return;
+    }
+
+    import('./lib/firebase').then(({ db }) => {
+      import('firebase/firestore').then(({ doc, getDoc }) => {
+        getDoc(doc(db, 'leagues', currentLeagueId)).then((snap) => {
+          if (snap.exists()) {
+            const data = snap.data();
+            setCurrentLeague({
+              id: currentLeagueId,
+              name: data.name,
+              creatorName: data.creatorName
+            });
+          }
+        });
+      });
+    });
+
+    const unsubscribe = subscribeLeagueMembers(currentLeagueId, (members) => {
+      setCurrentLeagueMembers(members);
+    });
+
+    return () => unsubscribe();
+  }, [currentLeagueId]);
+
+  // Custom League Handlers
+  const handleCreateLeague = async (leagueName: string, creatorName: string): Promise<string> => {
+    const exactScores = matches.filter(m => m.status === 'finished' && m.exactScoreWon).length;
+    const correctOutcomes = matches.filter(m => m.status === 'finished' && m.outcomeOnlyWon).length;
+    
+    const preds: Record<string, { home: number; away: number }> = {};
+    matches.forEach((m) => {
+      if (m.predHome !== undefined && m.predAway !== undefined) {
+        preds[m.id] = { home: m.predHome, away: m.predAway };
+      }
+    });
+
+    const generatedId = await createLeague(leagueName, creatorName, userPoints, exactScores, correctOutcomes, preds);
+    setMyLeagues(getMyLeagues());
+    setCurrentLeagueId(generatedId);
+    showToast(`League "${leagueName}" registered on Firebase Firestore!`, 'success');
+    return generatedId;
+  };
+
+  const handleJoinLeague = async (leagueId: string, participantName: string): Promise<void> => {
+    const exactScores = matches.filter(m => m.status === 'finished' && m.exactScoreWon).length;
+    const correctOutcomes = matches.filter(m => m.status === 'finished' && m.outcomeOnlyWon).length;
+    
+    const preds: Record<string, { home: number; away: number }> = {};
+    matches.forEach((m) => {
+      if (m.predHome !== undefined && m.predAway !== undefined) {
+        preds[m.id] = { home: m.predHome, away: m.predAway };
+      }
+    });
+
+    await joinLeague(leagueId, participantName, userPoints, exactScores, correctOutcomes, preds);
+    setMyLeagues(getMyLeagues());
+    setCurrentLeagueId(leagueId);
+    showToast(`Joined Sync League successfully!`, 'success');
+  };
 
   // Handle saving score prediction values on Fixtures view
   const handleSavePrediction = (matchId: string, homeScore: number, awayScore: number) => {
     setMatches((prevMatches) => {
       const updated = prevMatches.map((m) => {
         if (m.id === matchId) {
-          // If this match was upcoming, lock user inputs
           return {
             ...m,
             predHome: homeScore,
@@ -133,13 +261,13 @@ export default function App() {
     });
     showToast(`Prediction score (${homeScore} - ${awayScore}) saved successfully!`, 'success');
   };
+
   // Live match simulator! Completes predictions/awards points in real-time
   const handleSimulateMatchLiveState = (matchId: string) => {
     setMatches((prevMatches) => {
       const updated = prevMatches.map((m) => {
         if (m.id === matchId) {
           if (m.status === 'upcoming') {
-            // Make it Live!
             return {
               ...m,
               status: 'live',
@@ -149,7 +277,6 @@ export default function App() {
               awayRealScore: Math.floor(Math.random() * 3),
             };
           } else if (m.status === 'live') {
-            // Finalise & calculate score awards!
             const realHome = m.homeRealScore ?? Math.floor(Math.random() * 3);
             const realAway = m.awayRealScore ?? Math.floor(Math.random() * 3);
             
@@ -162,17 +289,16 @@ export default function App() {
 
             if (predHome === realHome && predAway === realAway) {
               exactMatch = true;
-              pointsAwarded = 3; // EXACT SCORE = 3 PTS
+              pointsAwarded = 3;
             } else if (
               (predHome > predAway && realHome > realAway) ||
               (predHome < predAway && realHome < realAway) ||
               (predHome === predAway && realHome === realAway)
             ) {
               outcomeOnly = true;
-              pointsAwarded = 1; // CORRECT OUTCOME = 1 PT
+              pointsAwarded = 1;
             }
 
-            // Trigger points additions
             if (pointsAwarded > 0) {
               setUserPoints((prev) => prev + pointsAwarded);
               setTimeout(() => {
@@ -204,7 +330,6 @@ export default function App() {
 
   // Quick predict form submissions
   const handleQuickPredictSubmit = (homeScore: number, awayScore: number) => {
-    // Save prediction on the first eligible upcoming match!
     let found = false;
     setMatches((prevMatches) => {
       const updated = prevMatches.map((m) => {
@@ -228,49 +353,45 @@ export default function App() {
     }
   };
 
-  // Save Bonus Predictions - Champion Winner
   const handleSaveChampion = (champion: string) => {
     setBonusChamp(champion);
     showToast(`Champion prediction set to ${champion}!`, 'success');
   };
 
-  // Save Bonus Predictions - Golden Boot Top Scorer
   const handleSaveGoldenBoot = (goldenBoot: string) => {
     setBonusBoot(goldenBoot);
     showToast(`Golden Boot prediction set to ${goldenBoot}!`, 'success');
   };
 
-  // Static list values to fit screens properly
   const recentResultsList = [
     {
-      teams: 'ENG 3 - 0 POL',
+      teams: 'MEX 2 - 1 ECU',
       stage: 'Group Stage',
       flags: [
-        'https://lh3.googleusercontent.com/aida-public/AB6AXuDVSjPvlvs6O2HzkDM2CbYHWWqJEEL7uWRcuWtiDooDt02_i3qdCNTVUXom1sZZwF5ZbEwFEwb28YnYlEShBBHUhkXu9d5m0wrFGGN0D2MRyqKggRLpKata9pmJzK_sUdveySMO4ibVNrRe5Od-fR_m95Jvyi8Z8jt1AatGGMYsVlogR1xye5CkJDVfZYBD18kL-7GSXNe8GBocx24zU8-07yrHU6YLVP5RtdhxzbeQU7FeOVXbA3D0rG3iSkbtVOaAZ1h3WOjoKa0',
-        'https://lh3.googleusercontent.com/aida-public/AB6AXuAJ9W78-FNsOeU2LlXLCZUaDc1A_vREPSV5uR_nASqCi6S_Oq043Na-AbmdI0SlIQE8sj7Qa4VV3GwDr9dmdv35SMcfqR-8uHQVEtN2dvb47nARpt8fNx90i1AjL8A7hAOb2xaNTt2-ecK6uyvx4P58UkiF-xnH1LY1f4dBCyIxMI7ysaOAMpOPuVYeMEwgrAHrLlwXHujPWyITnTRWf9ZbvGNaW80poPk4fuMuFqTXPHYmutOpeLFP0f06Qr8dfXDQr0e5xd-jeQA'
+        'https://flagcdn.com/w160/mx.png',
+        'https://flagcdn.com/w160/ec.png'
       ],
       points: '+3 PTS',
       badge: 'Exact Score!',
     },
     {
-      teams: 'BEL 1 - 2 POR',
+      teams: 'CAN 1 - 2 CRO',
       stage: 'Group Stage',
       flags: [
-        'https://lh3.googleusercontent.com/aida-public/AB6AXuAOunLwHFU82ELMEQqJB1V4a_MYvQnJKkZ7iz_Xxvf5dRT1KTInseyVvS6jssQpUEe2HeW7wtEPPWwUHr_IyL1H2j-PtIDzMAAAKck8i0zEH8ZPyHGVhFxbEsSjofeZnM6ZNkTTH2E6lCtm06xVyIqmeb0KcgZQRqWtQX4lMXm26At5K8iFlg9rDt8nz35MBL3PBFjPc95YyjaE5AE3e8iBKgE2-ldTPY2-DMnFZ6prwPW7_g68goj5ow3-s8xhQGdmAEt2Ad5sLZg',
-        'https://lh3.googleusercontent.com/aida-public/AB6AXuCvytrFbGoHZnI7h7FwWxz8qLsfh21aLVq_WL9EMklhSdssBAciHJxlnp8nKjCnwao-4h9FfQ38gdXYFg9h33Bj3bCso3ONZtj7A6-4P8DF2jttRlh-ZrBq4_0TwI7gRURk3-6yiTRlRarcK6XI7JxqzU5Z5GC5g_xiLMKvTd5KjrihWn5Xgp0q_2jNUl7f7DkhtCfjM0gmEmtIDfVkBADuWn4VHFPShtH9AcQnfN5TrNh95Ox87Y7EvdaNjH_juJkwiuRN7IB0Oqs'
+        'https://flagcdn.com/w160/ca.png',
+        'https://flagcdn.com/w160/hr.png'
       ],
       points: '0 PTS',
       badge: 'Incorrect',
     }
   ];
 
-  // Get next spotlight match
-  const spotlightMatch = matches.find(m => m.id === 'm14') || matches[0];
+  const spotlightMatch = matches.find(m => m.status === 'upcoming') || matches[0];
 
   return (
     <div className="bg-background-app text-on-surface font-sans min-h-screen relative flex flex-col pt-16">
       
-      {/* Dynamic blurred orbs for sports environment feel */}
+      {/* Ambient glass blur nodes */}
       <div className="fixed top-0 left-0 w-full h-full pointer-events-none -z-10 overflow-hidden select-none">
         <div className="absolute top-[-10%] right-[-10%] w-[50%] h-[50%] bg-[#0f172a]/40 blur-[130px] rounded-full"></div>
         <div className="absolute bottom-[-10%] left-[-10%] w-[40%] h-[40%] bg-[#00b954]/10 blur-[110px] rounded-full"></div>
@@ -353,11 +474,20 @@ export default function App() {
             </div>
             <div className="space-y-4 text-xs text-on-surface-variant">
               <div>
-                <label className="block text-on-surface font-semibold mb-1">User Account Name</label>
-                <p className="p-2 bg-surface-low rounded border border-outline-variant text-[#e0e3e5] font-semibold">Tournament Pro (You)</p>
+                <label className="block text-on-surface font-semibold mb-1">Display Profile Name (Nickname)</label>
+                <input 
+                  type="text" 
+                  value={username} 
+                  onChange={(e) => {
+                    const val = e.target.value.substring(0, 30);
+                    setUsername(val);
+                    localStorage.setItem('goalmaster_username', val);
+                  }}
+                  className="w-full bg-surface-lowest text-on-surface border border-outline-variant rounded p-2 focus:border-brand-secondary focus:ring-0"
+                />
               </div>
               <div>
-                <label className="block text-on-surface font-semibold mb-1 block">Live Database simulation</label>
+                <label className="block text-on-surface font-semibold mb-1">Live Database Simulation</label>
                 <button 
                   onClick={() => {
                     localStorage.clear();
@@ -366,10 +496,11 @@ export default function App() {
                     setMatches(INITIAL_MATCHES);
                     setBonusBoot('Kylian Mbappé (France)');
                     setBonusChamp('France');
+                    setUsername('Tournament Pro');
                     setShowSettingsPanel(false);
                     showToast('Data reset to default values!', 'success');
                   }}
-                  className="w-full bg-[#93000a] text-[#ffdad6] p-2 rounded-lg font-bold hover:brightness-115 text-center mt-1"
+                  className="w-full bg-[#93000a] text-[#ffdad6] p-2 rounded-lg font-bold hover:brightness-115 text-center mt-1 cursor-pointer"
                 >
                   Reset App Data LocalStorage
                 </button>
@@ -391,7 +522,7 @@ export default function App() {
             </div>
             <div className="space-y-3 text-xs leading-normal font-sans">
               <div className="p-2 rounded bg-surface-low border-l-2 border-brand-secondary">
-                <p className="font-semibold text-on-surface selection:bg-brand-secondary">Prediction Double Points</p>
+                <p className="font-semibold text-on-surface">Prediction Double Points</p>
                 <p className="text-on-surface-variant mt-0.5 text-[11px]">Group stage scores score 2x multipliers this weekend only. Finalise predictions now!</p>
               </div>
               <div className="p-2 rounded bg-surface-low border-l-2 border-amber-500">
@@ -413,10 +544,10 @@ export default function App() {
               nextMatch={spotlightMatch}
               recentResults={recentResultsList}
               quickPredict={{
-                home: 'Portugal',
-                away: 'Netherlands',
-                homeFlag: 'https://lh3.googleusercontent.com/aida-public/AB6AXuCvytrFbGoHZnI7h7FwWxz8qLsfh21aLVq_WL9EMklhSdssBAciHJxlnp8nKjCnwao-4h9FfQ38gdXYFg9h33Bj3bCso3ONZtj7A6-4P8DF2jttRlh-ZrBq4_0TwI7gRURk3-6yiTRlRarcK6XI7JxqzU5Z5GC5g_xiLMKvTd5KjrihWn5Xgp0q_2jNUl7f7DkhtCfjM0gmEmtIDfVkBADuWn4VHFPShtH9AcQnfN5TrNh95Ox87Y7EvdaNjH_juJkwiuRN7IB0Oqs',
-                awayFlag: 'https://lh3.googleusercontent.com/aida-public/AB6AXuAVA1mT9Q7C0l8SygcT1g5miThrH-3mxJXL43gGzUMkDajBecGzIyVBjsT6_eJ8MQU9GOWEQMaBwu6uz3WFiZfrfxx_AhyR_xWWGPwnvDDiZdxL5_EzQt69cGZ4mxqa3nUhIjRl7aL3mBUkv3DVmBPXDbQZd4lhFAR3wJCofoILLqsRjmQMufpP8FHcc7a5v3bEg-9arsNm7P_BJp2A_VRJx8jPlh_aFUI7ei0E50wB8UC6HwtpEo1rHuOoVKrnSMuurjIUdQ9DpAY'
+                home: 'PORTUGAL',
+                away: 'NETHERLANDS',
+                homeFlag: 'https://flagcdn.com/w160/pt.png',
+                awayFlag: 'https://flagcdn.com/w160/nl.png'
               }}
               globalCompetitors={globalStandings}
               friendsCompetitors={friendsStandings}
@@ -453,6 +584,14 @@ export default function App() {
               userRank={userRank}
               globalCompetitors={globalStandings}
               friendsCompetitors={friendsStandings}
+              myLeagues={myLeagues}
+              currentLeagueId={currentLeagueId}
+              currentLeague={currentLeague}
+              currentLeagueMembers={currentLeagueMembers}
+              onCreateLeague={handleCreateLeague}
+              onJoinLeague={handleJoinLeague}
+              onSelectLeague={setCurrentLeagueId}
+              userMemberId={userMemberId}
             />
           )}
 
@@ -479,7 +618,7 @@ export default function App() {
                         <p className="text-[10px] text-on-surface-variant uppercase tracking-wider font-semibold mt-0.5 font-display">{m.stage} Stage</p>
                       </div>
                     </div>
-                    {m.pointsWon && m.pointsWon > 0 ? (
+                    {m.pointsWon !== undefined && m.pointsWon > 0 ? (
                       <span className="text-brand-secondary font-bold text-xs bg-brand-secondary/10 border border-brand-secondary/20 px-2.5 py-1 rounded-full">
                         +{m.pointsWon} PTS
                       </span>
@@ -496,6 +635,75 @@ export default function App() {
 
         </main>
       </div>
+
+      {/* Dynamic Invitation Overlay Modal */}
+      {inviteModalOpen && joinInviteLeague && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-md flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-surface-base border border-outline-variant/60 rounded-2xl max-w-md w-full p-6 shadow-2xl relative">
+            <button 
+              onClick={() => setInviteModalOpen(false)} 
+              className="absolute top-4 right-4 text-on-surface-variant hover:text-on-surface cursor-pointer"
+            >
+              <X className="w-5 h-5" />
+            </button>
+
+            <div className="flex flex-col items-center text-center space-y-4">
+              <div className="w-12 h-12 rounded-full bg-[#00b954]/10 border border-[#00b954]/30 flex items-center justify-center text-[#00b954]">
+                <UserPlus className="w-6 h-6 animate-pulse" />
+              </div>
+
+              <div>
+                <span className="text-[10px] font-extrabold uppercase tracking-widest text-brand-tertiary font-display">
+                  Multiplayer Invitation
+                </span>
+                <h3 className="font-display font-black text-xl text-on-surface mt-1">
+                  Join &quot;{joinInviteLeague.name}&quot;
+                </h3>
+                <p className="text-xs text-on-surface-variant mt-1 leading-normal font-sans">
+                  You have been invited by <strong className="text-brand-secondary">{joinInviteLeague.creatorName}</strong> to join their live prediction league for World Cup 2026!
+                </p>
+              </div>
+
+              <div className="w-full space-y-3 font-sans text-xs text-left">
+                <div>
+                  <label className="block text-on-surface-variant font-bold mb-1">Set Your Username</label>
+                  <input 
+                    type="text" 
+                    value={username}
+                    onChange={(e) => {
+                      const val = e.target.value.substring(0, 30);
+                      setUsername(val);
+                      localStorage.setItem('goalmaster_username', val);
+                    }}
+                    placeholder="e.g. PredictionKing" 
+                    className="w-full bg-surface-lowest text-on-surface border border-outline-variant rounded-lg p-2.5 focus:border-brand-secondary focus:ring-0"
+                  />
+                </div>
+
+                <button 
+                  onClick={async () => {
+                    if (!username.trim()) {
+                      alert('Please input a valid username!');
+                      return;
+                    }
+                    try {
+                      await handleJoinLeague(joinInviteLeague.id, username);
+                      setInviteModalOpen(false);
+                      setActiveTab('leaderboard');
+                      window.history.replaceState({}, document.title, window.location.pathname);
+                    } catch (err) {
+                      alert(err instanceof Error ? err.message : 'Error joining custom league.');
+                    }
+                  }}
+                  className="w-full bg-brand-secondary text-brand-on-secondary hover:brightness-110 p-3 rounded-lg font-bold font-display uppercase tracking-wider text-xs flex justify-center items-center gap-1.5 cursor-pointer"
+                >
+                  <Check className="w-4 h-4" /> ACCEPT INVITATION & ENTER
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Ticking Toast Feedback banner */}
       {toastMessage && (

@@ -1,0 +1,50 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default catch-all: Deny all by default
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions for validation
+    function isValidId(id) {
+       return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Leagues collection rules
+    match /leagues/{leagueId} {
+      allow get: if isValidId(leagueId);
+      allow list: if false; // Block overall list queries to prevent scraping
+      
+      allow create: if isValidId(leagueId) 
+        && request.resource.data.name is string 
+        && request.resource.data.name.size() <= 100 
+        && request.resource.data.creatorName is string 
+        && request.resource.data.creatorName.size() <= 50;
+        
+      allow update, delete: if false; // Custom leagues are immutable to prevent hijacking
+    }
+
+    // Members subcollection rules
+    match /leagues/{leagueId}/members/{memberId} {
+      allow get: if isValidId(leagueId) && isValidId(memberId);
+      allow list: if isValidId(leagueId); // Allow listing only within a specific league ID
+      
+      allow create: if isValidId(leagueId) && isValidId(memberId)
+        && request.resource.data.name is string 
+        && request.resource.data.name.size() <= 50
+        && request.resource.data.points is int
+        && request.resource.data.exactScores is int
+        && request.resource.data.correctOutcomes is int;
+        
+      allow update: if isValidId(leagueId) && isValidId(memberId)
+        && request.resource.data.points is int
+        && request.resource.data.exactScores is int
+        && request.resource.data.correctOutcomes is int
+        && request.resource.data.name == resource.data.name; // Block spoofing of member name
+        
+      allow delete: if false;
+    }
+  }
+}

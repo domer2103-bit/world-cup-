@@ -1,0 +1,66 @@
+{
+  "entities": {
+    "League": {
+      "title": "League",
+      "description": "A custom tournament score prediction league.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The name of the league"
+        },
+        "createdAt": {
+          "type": "string",
+          "description": "Creation timestamp"
+        },
+        "creatorName": {
+          "type": "string",
+          "description": "The name of the creator"
+        }
+      },
+      "required": ["name", "creatorName"]
+    },
+    "Member": {
+      "title": "Member",
+      "description": "A participant in a custom league.",
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "The display name of the participant"
+        },
+        "points": {
+          "type": "integer",
+          "description": "Current total score points"
+        },
+        "exactScores": {
+          "type": "integer",
+          "description": "Number of exact scores predicted"
+        },
+        "correctOutcomes": {
+          "type": "integer",
+          "description": "Number of correct match outcomes"
+        },
+        "predictions": {
+          "type": "object",
+          "description": "The map of matches and score predictions"
+        },
+        "updatedAt": {
+          "type": "string",
+          "description": "Last update timestamp"
+        }
+      },
+      "required": ["name", "points"]
+    }
+  },
+  "firestore": {
+    "/leagues/{leagueId}": {
+      "schema": "League",
+      "description": "Collection of custom leagues."
+    },
+    "/leagues/{leagueId}/members/{memberId}": {
+      "schema": "Member",
+      "description": "Subcollection of participants in each league."
+    }
+  }
+}
