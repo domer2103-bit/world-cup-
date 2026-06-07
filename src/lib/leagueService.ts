@@ -13,7 +13,54 @@ import {
   query, 
   orderBy 
 } from 'firebase/firestore';
-import { db } from './firebase';
+import { db, auth } from './firebase';
+
+export enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
 
 export interface LeagueInfo {
   id: string;
@@ -51,24 +98,28 @@ export const createLeague = async (
   correctOutcomes: number,
   predictions: Record<string, { home: number; away: number }> = {}
 ): Promise<string> => {
+  const leaguesRef = collection(db, 'leagues');
+  const newLeagueDoc = doc(leaguesRef); // Generate unique ID
+  const leagueId = newLeagueDoc.id;
+
+  const leagueData = {
+    name: leagueName,
+    creatorName: creatorName,
+    createdAt: new Date().toISOString()
+  };
+
+  // 1. Create outer league information
   try {
-    const leaguesRef = collection(db, 'leagues');
-    const newLeagueDoc = doc(leaguesRef); // Generate unique ID
-    const leagueId = newLeagueDoc.id;
-
-    const leagueData = {
-      name: leagueName,
-      creatorName: creatorName,
-      createdAt: new Date().toISOString()
-    };
-
-    // 1. Create outer league information
     await setDoc(newLeagueDoc, leagueData);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.CREATE, `leagues/${leagueId}`);
+  }
 
-    // 2. Register creator as the primary participant
-    const memberId = getOrGenerateMemberId();
-    const memberDocRef = doc(db, 'leagues', leagueId, 'members', memberId);
-    
+  // 2. Register creator as the primary participant
+  const memberId = getOrGenerateMemberId();
+  const memberDocRef = doc(db, 'leagues', leagueId, 'members', memberId);
+  
+  try {
     await setDoc(memberDocRef, {
       name: creatorName,
       points: userPoints,
@@ -77,15 +128,14 @@ export const createLeague = async (
       predictions: predictions,
       updatedAt: new Date().toISOString()
     });
-
-    // 3. Save to locally created/joined list in localStorage
-    saveLeagueLocally(leagueId, leagueName);
-
-    return leagueId;
   } catch (error) {
-    console.error('Failed to create league in Firestore:', error);
-    throw error;
+    handleFirestoreError(error, OperationType.CREATE, `leagues/${leagueId}/members/${memberId}`);
   }
+
+  // 3. Save to locally created/joined list in localStorage
+  saveLeagueLocally(leagueId, leagueName);
+
+  return leagueId;
 };
 
 // Join an existing league
@@ -97,26 +147,31 @@ export const joinLeague = async (
   correctOutcomes: number,
   predictions: Record<string, { home: number; away: number }> = {}
 ): Promise<LeagueInfo> => {
+  // 1. Verify if league exists first
+  const leagueDocRef = doc(db, 'leagues', leagueId);
+  let leagueSnap;
   try {
-    // 1. Verify if league exists first
-    const leagueDocRef = doc(db, 'leagues', leagueId);
-    const leagueSnap = await getDoc(leagueDocRef);
+    leagueSnap = await getDoc(leagueDocRef);
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, `leagues/${leagueId}`);
+  }
 
-    if (!leagueSnap.exists()) {
-      throw new Error('This League ID does not exist. Please check the URL or invitation link.');
-    }
+  if (!leagueSnap || !leagueSnap.exists()) {
+    throw new Error('This League ID does not exist. Please check the URL or invitation link.');
+  }
 
-    const leagueData = leagueSnap.data() as Omit<LeagueInfo, 'id'>;
-    const leagueInfo: LeagueInfo = {
-      id: leagueId,
-      name: leagueData.name,
-      creatorName: leagueData.creatorName
-    };
+  const leagueData = leagueSnap.data() as Omit<LeagueInfo, 'id'>;
+  const leagueInfo: LeagueInfo = {
+    id: leagueId,
+    name: leagueData.name,
+    creatorName: leagueData.creatorName
+  };
 
-    // 2. Add member record safely
-    const memberId = getOrGenerateMemberId();
-    const memberDocRef = doc(db, 'leagues', leagueId, 'members', memberId);
+  // 2. Add member record safely
+  const memberId = getOrGenerateMemberId();
+  const memberDocRef = doc(db, 'leagues', leagueId, 'members', memberId);
 
+  try {
     await setDoc(memberDocRef, {
       name: participantName,
       points: userPoints,
@@ -125,15 +180,14 @@ export const joinLeague = async (
       predictions: predictions,
       updatedAt: new Date().toISOString()
     });
-
-    // 3. Save to locally joined lists in localStorage
-    saveLeagueLocally(leagueId, leagueData.name);
-
-    return leagueInfo;
   } catch (error) {
-    console.error('Failed to join league:', error);
-    throw error;
+    handleFirestoreError(error, OperationType.CREATE, `leagues/${leagueId}/members/${memberId}`);
   }
+
+  // 3. Save to locally joined lists in localStorage
+  saveLeagueLocally(leagueId, leagueData.name);
+
+  return leagueInfo;
 };
 
 // Helper to persist leagues inside client local registry

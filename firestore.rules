@@ -21,7 +21,8 @@ service cloud.firestore {
         && request.resource.data.name is string 
         && request.resource.data.name.size() <= 100 
         && request.resource.data.creatorName is string 
-        && request.resource.data.creatorName.size() <= 50;
+        && request.resource.data.creatorName.size() <= 60
+        && (request.resource.data.createdAt == null || request.resource.data.createdAt is string);
         
       allow update, delete: if false; // Custom leagues are immutable to prevent hijacking
     }
@@ -33,15 +34,19 @@ service cloud.firestore {
       
       allow create: if isValidId(leagueId) && isValidId(memberId)
         && request.resource.data.name is string 
-        && request.resource.data.name.size() <= 50
-        && request.resource.data.points is int
-        && request.resource.data.exactScores is int
-        && request.resource.data.correctOutcomes is int;
+        && request.resource.data.name.size() <= 60
+        && (request.resource.data.points is int || request.resource.data.points is float)
+        && (request.resource.data.exactScores is int || request.resource.data.exactScores is float)
+        && (request.resource.data.correctOutcomes is int || request.resource.data.correctOutcomes is float)
+        && (request.resource.data.predictions == null || request.resource.data.predictions is map)
+        && (request.resource.data.updatedAt == null || request.resource.data.updatedAt is string);
         
       allow update: if isValidId(leagueId) && isValidId(memberId)
-        && request.resource.data.points is int
-        && request.resource.data.exactScores is int
-        && request.resource.data.correctOutcomes is int
+        && (request.resource.data.points is int || request.resource.data.points is float)
+        && (request.resource.data.exactScores is int || request.resource.data.exactScores is float)
+        && (request.resource.data.correctOutcomes is int || request.resource.data.correctOutcomes is float)
+        && (request.resource.data.predictions == null || request.resource.data.predictions is map)
+        && (request.resource.data.updatedAt == null || request.resource.data.updatedAt is string)
         && request.resource.data.name == resource.data.name; // Block spoofing of member name
         
       allow delete: if false;
